@@ -1,4 +1,6 @@
 const { Router } = require("express");
+const multer = require("multer");
+const cloudinary = require("cloudinary").v2;
 const Borrower = require("../models/Borrower.cjs");
 const Loan = require("../models/Loan.cjs");
 const Agent = require("../models/Agent.cjs");
@@ -6,6 +8,40 @@ const Payment = require("../models/Payment.cjs");
 const Task = require("../models/Task.cjs");
 
 const router = Router();
+
+// Cloudinary configuration (ensure env vars are set)
+cloudinary.config({
+    cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
+    api_key: process.env.CLOUDINARY_API_KEY,
+    api_secret: process.env.CLOUDINARY_API_SECRET,
+});
+
+// Multer memory storage for direct upload
+const upload = multer({ storage: multer.memoryStorage() });
+
+// Upload receipt file to Cloudinary
+router.post("/upload/receipt", upload.single("file"), async (req, res) => {
+    try {
+        if (!req.file) {
+            return res.status(400).json({ error: "No file uploaded" });
+        }
+        const base64 = `data:${req.file.mimetype};base64,${req.file.buffer.toString("base64")}`;
+        const uploaded = await cloudinary.uploader.upload(base64, {
+            folder: "finance-app/receipts",
+            resource_type: "image",
+        });
+        return res.json({
+            url: uploaded.secure_url,
+            public_id: uploaded.public_id,
+            bytes: uploaded.bytes,
+            width: uploaded.width,
+            height: uploaded.height,
+            format: uploaded.format,
+        });
+    } catch (err) {
+        return res.status(500).json({ error: err?.message || "Failed to upload receipt" });
+    }
+});
 
 // List all borrowers (optionally include loans with ?include=loans)
 router.get("/borrowers", async (req, res) => {
@@ -171,10 +207,12 @@ router.post("/borrowers", async (req, res) => {
 		const purpose = body.purpose;
 		const assignedAgent = body.assignedAgent;
 		if (amount && !Number.isNaN(amount)) {
+			// Calculate total due including interest if provided
+			const totalDue = amount + (amount * (Number.isNaN(interestRatePercent) ? 0 : interestRatePercent) / 100);
 			await Loan.create({
 				borrowerId: created._id,
 				amount,
-				remainingAmount: amount, // Initially, remaining amount equals total amount
+				remainingAmount: totalDue, // Initially, remaining equals principal + interest
 				totalPaid: 0, // No payments made yet
 				interestRatePercent: Number.isNaN(interestRatePercent) ? undefined : interestRatePercent,
 				tenureMonths: Number.isNaN(tenureMonths) ? undefined : tenureMonths,
@@ -489,7 +527,7 @@ router.get("/agent/:agentId/payments", async (req, res) => {
 // Create a new payment
 router.post("/payments", async (req, res) => {
 	try {
-		const { borrowerId, loanId, agentId, amount, paymentMode, location, receiptName } = req.body || {};
+		const { borrowerId, loanId, agentId, amount, paymentMode, location, receiptName, receiptUrl, receiptPublicId } = req.body || {};
 		
 		console.log('POST /api/manager/payments received:', req.body);
 		
@@ -542,6 +580,8 @@ router.post("/payments", async (req, res) => {
 				longitude: location.longitude
 			} : undefined,
 			receiptName: receiptName || undefined,
+			receiptUrl: receiptUrl || undefined,
+			receiptPublicId: receiptPublicId || undefined,
 		};
 
 		const createdPayment = await Payment.create(paymentData);
@@ -570,8 +610,10 @@ router.post("/payments", async (req, res) => {
 			createdAt: p.createdAt
 		})));
 		
-		const totalPaid = Math.min(existingPayments[0]?.total || 0, loan.amount);
-		const remainingAmount = Math.max(loan.amount - totalPaid, 0);
+		// Determine target due including interest
+		const targetDue = loan.amount + (loan.interestRatePercent ? (loan.amount * loan.interestRatePercent / 100) : 0);
+		const totalPaid = Math.min(existingPayments[0]?.total || 0, targetDue);
+		const remainingAmount = Math.max(targetDue - totalPaid, 0);
 		const newStatus = remainingAmount <= 0 ? "paid" : loan.status;
 		
 		console.log('Calculating loan update:', {
@@ -810,9 +852,10 @@ router.post("/loans/:loanId/init-payment-tracking", async (req, res) => {
 			{ $match: { loanId: loan._id } },
 			{ $group: { _id: null, total: { $sum: "$amount" } } }
 		]);
-		
-		const totalPaid = totalPayments[0]?.total || 0;
-		const remainingAmount = Math.max(loan.amount - totalPaid, 0);
+
+		const targetDue = loan.amount + (loan.interestRatePercent ? (loan.amount * loan.interestRatePercent / 100) : 0);
+		const totalPaid = Math.min(totalPayments[0]?.total || 0, targetDue);
+		const remainingAmount = Math.max(targetDue - totalPaid, 0);
 		
 		const updatedLoan = await Loan.findByIdAndUpdate(loanId, {
 			remainingAmount,
@@ -1206,7 +1249,7 @@ router.get("/borrower-approvals", async (req, res) => {
 router.post("/borrower-approvals/:borrowerId/approve", async (req, res) => {
 	try {
 		const { borrowerId } = req.params;
-		const { approvedBy = "manager" } = req.body;
+		const { approvedBy = "manager", assignedAgent: assignedAgentFromBody } = req.body || {};
 		
 		console.log('Approving borrower:', borrowerId);
 		
@@ -1218,18 +1261,30 @@ router.post("/borrower-approvals/:borrowerId/approve", async (req, res) => {
 		if (borrower.approvalStatus !== "pending") {
 			return res.status(400).json({ error: `Borrower is already ${borrower.approvalStatus}` });
 		}
-		
-		// Update borrower approval status
+
+		// Determine agent to assign
+		const assignedAgent = assignedAgentFromBody || borrower.assignedAgent;
+		if (!assignedAgent) {
+			return res.status(400).json({ error: "assignedAgent is required to approve borrower" });
+		}
+		const agent = await Agent.findOne({ agentId: assignedAgent });
+		if (!agent) {
+			return res.status(400).json({ error: `Assigned agent ${assignedAgent} not found` });
+		}
+
+		// Update borrower approval status and ensure active status and assignment
 		await Borrower.findByIdAndUpdate(borrowerId, {
 			approvalStatus: "approved",
 			approvedBy,
-			approvedAt: new Date()
+			approvedAt: new Date(),
+			status: "active",
+			assignedAgent,
 		});
 		
-		// Also update associated loan status if it exists
+		// Also update associated loan status and assignment if they exist
 		await Loan.updateMany(
 			{ borrowerId: borrowerId },
-			{ status: "active" }
+			{ status: "active", assignedAgent }
 		);
 		
 		console.log('Borrower approved successfully:', borrowerId);
@@ -1237,7 +1292,8 @@ router.post("/borrower-approvals/:borrowerId/approve", async (req, res) => {
 			message: "Borrower approved successfully",
 			borrowerId,
 			approvedBy,
-			approvedAt: new Date()
+			approvedAt: new Date(),
+			assignedAgent,
 		});
 	} catch (err) {
 		console.error('Error approving borrower:', err);
@@ -1346,14 +1402,15 @@ router.post("/agent-requests/:requestId/approve", async (req, res) => {
 			const loan = await Loan.findById(payment.loanId);
 			if (loan) {
 				// Recalculate totalPaid and remainingAmount
-				const totalPayments = await Payment.aggregate([
+			const totalPayments = await Payment.aggregate([
 					{ $match: { loanId: loan._id, reversed: { $ne: true } } },
 					{ $group: { _id: null, total: { $sum: "$amount" } } }
 				]);
 				
-				const totalPaid = totalPayments[0]?.total || 0;
-				const remainingAmount = Math.max(loan.amount - totalPaid, 0);
-				const newStatus = remainingAmount <= 0 ? "paid" : "active";
+			const targetDue = loan.amount + (loan.interestRatePercent ? (loan.amount * loan.interestRatePercent / 100) : 0);
+			const totalPaid = Math.min(totalPayments[0]?.total || 0, targetDue);
+			const remainingAmount = Math.max(targetDue - totalPaid, 0);
+			const newStatus = remainingAmount <= 0 ? "paid" : "active";
 				
 				await Loan.findByIdAndUpdate(loan._id, {
 					totalPaid,
@@ -1461,12 +1518,12 @@ router.post("/loans/:loanId/set-paid", async (req, res) => {
 			return res.status(404).json({ error: "Loan not found" });
 		}
 		
-		// Set the loan as fully paid
+		// Set the loan as fully paid (principal + interest)
 		const updatedLoan = await Loan.findByIdAndUpdate(
 			loanId,
 			{
 				$set: {
-					totalPaid: loan.amount,
+					totalPaid: loan.amount + (loan.interestRatePercent ? (loan.amount * loan.interestRatePercent / 100) : 0),
 					remainingAmount: 0,
 					status: "paid"
 				}
@@ -1508,8 +1565,9 @@ router.post("/agent/:agentId/fix-loans", async (req, res) => {
 				{ $group: { _id: null, total: { $sum: "$amount" } } }
 			]);
 			
-			const totalPaid = Math.min(totalPayments[0]?.total || 0, loan.amount);
-			const remainingAmount = Math.max(loan.amount - totalPaid, 0);
+			const targetDue = loan.amount + (loan.interestRatePercent ? (loan.amount * loan.interestRatePercent / 100) : 0);
+			const totalPaid = Math.min(totalPayments[0]?.total || 0, targetDue);
+			const remainingAmount = Math.max(targetDue - totalPaid, 0);
 			
 			const updatedLoan = await Loan.findByIdAndUpdate(loan._id, {
 				remainingAmount,
@@ -1586,8 +1644,9 @@ router.post("/payments/:paymentId/reverse", async (req, res) => {
 			{ $group: { _id: null, total: { $sum: "$amount" } } }
 		]);
 		
-		const totalPaid = totalPayments[0]?.total || 0;
-		const remainingAmount = Math.max(loan.amount - totalPaid, 0);
+		const targetDue = loan.amount + (loan.interestRatePercent ? (loan.amount * loan.interestRatePercent / 100) : 0);
+		const totalPaid = Math.min(totalPayments[0]?.total || 0, targetDue);
+		const remainingAmount = Math.max(targetDue - totalPaid, 0);
 		const newStatus = remainingAmount <= 0 ? "paid" : "active";
 		
 		// Update the loan

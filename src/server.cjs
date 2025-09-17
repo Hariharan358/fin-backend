@@ -13,6 +13,10 @@ const port = process.env.PORT ? Number(process.env.PORT) : 5000;
 app.use(cors());
 app.use(express.json());
 
+app.get("/", (_req, res) => {
+    res.json({ status: "ok", service: "finance-app-backend", routes: ["/health", "/api/manager/*"] });
+});
+
 app.get("/health", (_req, res) => {
 	res.json({ status: "ok" });
 });

@@ -12,6 +12,8 @@ const paymentSchema = new mongoose.Schema(
 			longitude: { type: Number }
 		},
 		receiptName: { type: String },
+		receiptUrl: { type: String },
+		receiptPublicId: { type: String },
 		reversed: { type: Boolean, default: false },
 		reversedAt: { type: Date },
 		reversedBy: { type: String },
