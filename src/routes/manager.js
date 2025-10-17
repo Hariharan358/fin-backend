@@ -372,6 +372,101 @@ router.post("/auth/agent", async (req, res) => {
 	}
 });
 
+// Borrower authentication (mobile + date of birth as password)
+router.post("/auth/borrower", async (req, res) => {
+    try {
+        const { mobile, dob } = req.body || {};
+        if (!mobile || !dob) {
+            return res.status(400).json({ error: "Mobile number and date of birth are required" });
+        }
+
+        // Parse DOB; accept YYYY-MM-DD or DD-MM-YYYY
+        const parseDob = (s) => {
+            if (typeof s !== 'string') return null;
+            const t = s.trim();
+            let y, m, d;
+            if (/^\d{4}-\d{2}-\d{2}$/.test(t)) {
+                [y, m, d] = t.split('-').map(Number);
+            } else if (/^\d{2}-\d{2}-\d{4}$/.test(t)) {
+                const parts = t.split('-').map(Number);
+                [d, m, y] = parts;
+            } else if (/^\d{2}\/\d{2}\/\d{4}$/.test(t)) {
+                const parts = t.split('/').map(Number);
+                [d, m, y] = parts;
+            } else if (/^\d{8}$/.test(t)) { // DDMMYYYY
+                d = Number(t.slice(0,2));
+                m = Number(t.slice(2,4));
+                y = Number(t.slice(4,8));
+            }
+            if (!y || !m || !d) return null;
+            // Use local date boundaries to avoid timezone off-by-one
+            const dt = new Date(y, m - 1, d);
+            dt.setHours(0,0,0,0);
+            return dt;
+        };
+
+        const dobDate = parseDob(dob);
+        if (!dobDate) {
+            return res.status(400).json({ error: "Invalid DOB format. Use YYYY-MM-DD or DD-MM-YYYY" });
+        }
+
+        // Build local date range for the provided day
+        const start = new Date(dobDate);
+        start.setHours(0,0,0,0);
+        const end = new Date(start);
+        end.setDate(end.getDate() + 1);
+
+        const mobileStr = mobile.toString().trim();
+        const digits = mobileStr.replace(/\D/g, "");
+        const last10 = digits.slice(-10);
+        const phoneCandidates = [mobileStr, digits, last10].filter(Boolean);
+
+        const borrower = await Borrower.findOne({
+            $and: [
+                {
+                    $or: [
+                        { phone: { $in: phoneCandidates } },
+                        // Match numbers stored with country code where the last 10 digits match
+                        { phone: { $regex: new RegExp(last10 + '$') } },
+                    ]
+                },
+                { dateOfBirth: { $gte: start, $lt: end } }
+            ]
+        });
+
+        if (!borrower) {
+            return res.status(401).json({ error: "Invalid mobile or DOB" });
+        }
+
+        // Optional: only allow approved/active borrowers
+        // if (borrower.approvalStatus !== 'approved') {
+        //     return res.status(403).json({ error: 'Borrower not approved' });
+        // }
+
+        // Load most recent loan
+        const loan = await Loan.findOne({ borrowerId: borrower._id }).sort({ createdAt: -1 });
+
+        const safeBorrower = {
+            _id: borrower._id,
+            name: borrower.name,
+            firstName: borrower.firstName,
+            lastName: borrower.lastName,
+            phone: borrower.phone,
+            email: borrower.email,
+            approvalStatus: borrower.approvalStatus,
+        };
+
+        return res.json({
+            success: true,
+            borrower: safeBorrower,
+            loan: loan ? { _id: loan._id, amount: loan.amount, status: loan.status } : null,
+            message: "Login successful",
+        });
+    } catch (err) {
+        return res.status(500).json({ error: err?.message || "Login failed" });
+    }
+});
+
 // Get agent-specific borrowers (only approved ones)
 router.get("/agent/:agentId/borrowers", async (req, res) => {
 	try {
