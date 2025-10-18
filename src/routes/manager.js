@@ -621,146 +621,158 @@ router.get("/agent/:agentId/payments", async (req, res) => {
 
 // Create a new payment
 router.post("/payments", async (req, res) => {
-	try {
-		const { borrowerId, loanId, agentId, amount, paymentMode, location, receiptName, receiptUrl, receiptPublicId } = req.body || {};
-		
-		console.log('POST /api/manager/payments received:', req.body);
-		
-		if (!borrowerId || !agentId || !amount) {
-			return res.status(400).json({ error: "Borrower ID, Agent ID, and amount are required" });
-		}
+    try {
+        const { borrowerId, loanId, agentId, amount, paymentMode, location, receiptName, receiptUrl, receiptPublicId } = req.body || {};
+        
+        console.log('POST /api/manager/payments received:', req.body);
+        
+        if (!borrowerId || !agentId || !amount) {
+            return res.status(400).json({ error: "Borrower ID, Agent ID, and amount are required" });
+        }
 
-		// Verify borrower exists
-		const borrower = await Borrower.findById(borrowerId);
-		if (!borrower) {
-			return res.status(400).json({ error: "Borrower not found" });
-		}
+        // Verify borrower exists
+        const borrower = await Borrower.findById(borrowerId);
+        if (!borrower) {
+            return res.status(400).json({ error: "Borrower not found" });
+        }
 
-		// Verify agent exists
-		const agent = await Agent.findOne({ agentId });
-		if (!agent) {
-			return res.status(400).json({ error: "Agent not found" });
-		}
+        // Verify agent exists
+        const agent = await Agent.findOne({ agentId });
+        if (!agent) {
+            return res.status(400).json({ error: "Agent not found" });
+        }
 
-		// Find the loan for this borrower (use the most recent active loan if loanId not provided)
-		let loan;
-		if (loanId) {
-			loan = await Loan.findById(loanId);
-		} else {
-			loan = await Loan.findOne({ borrowerId, status: "active" }).sort({ createdAt: -1 });
-		}
-		
-		console.log('Found loan for payment:', {
-			loanId: loan?._id,
-			borrowerId,
-			loanAmount: loan?.amount,
-			remainingAmount: loan?.remainingAmount,
-			totalPaid: loan?.totalPaid,
-			status: loan?.status,
-			assignedAgent: loan?.assignedAgent
-		});
-		
-		if (!loan) {
-			return res.status(400).json({ error: "No active loan found for this borrower" });
-		}
+        // Find the loan for this borrower (use the most recent active loan if loanId not provided)
+        let loan;
+        if (loanId) {
+            loan = await Loan.findById(loanId);
+        } else {
+            loan = await Loan.findOne({ borrowerId, status: "active" }).sort({ createdAt: -1 });
+        }
+        
+        console.log('Found loan for payment:', {
+            loanId: loan?._id,
+            borrowerId,
+            loanAmount: loan?.amount,
+            remainingAmount: loan?.remainingAmount,
+            totalPaid: loan?.totalPaid,
+            status: loan?.status,
+            assignedAgent: loan?.assignedAgent
+        });
+        
+        if (!loan) {
+            return res.status(400).json({ error: "No active loan found for this borrower" });
+        }
 
-		const paymentData = {
-			loanId: loan._id,
-			borrowerId,
-			agentId,
-			amount: Number(amount),
-			paymentMode: paymentMode || "cash",
-			location: location ? {
-				latitude: location.latitude,
-				longitude: location.longitude
-			} : undefined,
-			receiptName: receiptName || undefined,
-			receiptUrl: receiptUrl || undefined,
-			receiptPublicId: receiptPublicId || undefined,
-		};
+        const paymentData = {
+            loanId: loan._id,
+            borrowerId,
+            agentId,
+            amount: Number(amount),
+            paymentMode: paymentMode || "cash",
+            location: location ? {
+                latitude: location.latitude,
+                longitude: location.longitude
+            } : undefined,
+            receiptName: receiptName || undefined,
+            receiptUrl: receiptUrl || undefined,
+            receiptPublicId: receiptPublicId || undefined,
+        };
 
-		const createdPayment = await Payment.create(paymentData);
-		
-		// Update the loan amount after payment
-		const paymentAmount = Number(amount);
-		console.log('Updating loan with payment:', {
-			loanId: loan._id,
-			paymentAmount,
-			currentRemaining: loan.remainingAmount,
-			currentTotalPaid: loan.totalPaid
-		});
-		
-		// Calculate total payments for this loan including the new payment (excluding reversed)
-		const existingPayments = await Payment.aggregate([
-			{ $match: { loanId: loan._id, reversed: { $ne: true } } },
-			{ $group: { _id: null, total: { $sum: "$amount" } } }
-		]);
-		
-		// Also get all payments for debugging
-		const allPayments = await Payment.find({ loanId: loan._id });
-		console.log('All payments for loan:', allPayments.map(p => ({
-			id: p._id,
-			amount: p.amount,
-			reversed: p.reversed,
-			createdAt: p.createdAt
-		})));
-		
-		// Determine target due including interest
-		const targetDue = loan.amount + (loan.interestRatePercent ? (loan.amount * loan.interestRatePercent / 100) : 0);
-		const totalPaid = Math.min(existingPayments[0]?.total || 0, targetDue);
-		const remainingAmount = Math.max(targetDue - totalPaid, 0);
-		const newStatus = remainingAmount <= 0 ? "paid" : loan.status;
-		
-		console.log('Calculating loan update:', {
-			loanId: loan._id,
-			originalAmount: loan.amount,
-			totalPaid,
-			remainingAmount,
-			newStatus
-		});
-		
-		// Update the loan with calculated values
-		const updatedLoan = await Loan.findByIdAndUpdate(
-			loan._id,
-			{
-				$set: {
-					totalPaid,
-					remainingAmount,
-					status: newStatus
-				}
-			},
-			{ new: true }
-		);
-		
-		console.log('Loan updated successfully:', {
-			loanId: updatedLoan._id,
-			amount: updatedLoan.amount,
-			remainingAmount: updatedLoan.remainingAmount,
-			totalPaid: updatedLoan.totalPaid,
-			status: updatedLoan.status
-		});
-		
-		return res.status(201).json(createdPayment);
-	} catch (err) {
-		console.error('Payment creation error:', err);
-		return res.status(500).json({ error: err?.message || "Failed to create payment" });
-	}
+        const createdPayment = await Payment.create(paymentData);
+        
+        // Update the loan amount after payment
+        const paymentAmount = Number(amount);
+        console.log('Updating loan with payment:', {
+            loanId: loan._id,
+            paymentAmount,
+            currentRemaining: loan.remainingAmount,
+            currentTotalPaid: loan.totalPaid
+        });
+        
+        // Calculate total payments for this loan including the new payment (excluding reversed)
+        const existingPayments = await Payment.aggregate([
+            { $match: { loanId: loan._id, reversed: { $ne: true } } },
+            { $group: { _id: null, total: { $sum: "$amount" } } }
+        ]);
+        
+        // Also get all payments for debugging
+        const allPayments = await Payment.find({ loanId: loan._id });
+        console.log('All payments for loan:', allPayments.map(p => ({
+            id: p._id,
+            amount: p.amount,
+            reversed: p.reversed,
+            createdAt: p.createdAt
+        })));
+        
+        // Determine target due including interest
+        const targetDue = loan.amount + (loan.interestRatePercent ? (loan.amount * loan.interestRatePercent / 100) : 0);
+        const totalPaid = Math.min(existingPayments[0]?.total || 0, targetDue);
+        const remainingAmount = Math.max(targetDue - totalPaid, 0);
+        const newStatus = remainingAmount <= 0 ? "paid" : loan.status;
+        
+        console.log('Calculating loan update:', {
+            loanId: loan._id,
+            originalAmount: loan.amount,
+            totalPaid,
+            remainingAmount,
+            newStatus
+        });
+        
+        // Update the loan with calculated values
+        const updatedLoan = await Loan.findByIdAndUpdate(
+            loan._id,
+            {
+                $set: {
+                    totalPaid,
+                    remainingAmount,
+                    status: newStatus
+                }
+            },
+            { new: true }
+        );
+        
+        console.log('Loan updated successfully:', {
+            loanId: updatedLoan._id,
+            amount: updatedLoan.amount,
+            remainingAmount: updatedLoan.remainingAmount,
+            totalPaid: updatedLoan.totalPaid,
+            status: updatedLoan.status
+        });
+        
+        return res.status(201).json(createdPayment);
+    } catch (err) {
+        console.error('Payment creation error:', err);
+        return res.status(500).json({ error: err?.message || "Failed to create payment" });
+    }
+});
+
+router.get("/borrowers/:id/payments", async (req, res) => {
+    try {
+        const { id } = req.params;
+        const limit = Math.max(1, Math.min(50, Number(req.query.limit) || 10));
+        const payments = await Payment.find({ borrowerId: id, reversed: { $ne: true } })
+            .sort({ createdAt: -1 })
+            .limit(limit)
+            .lean();
+        return res.json(payments);
+    } catch (err) {
+        return res.status(500).json({ error: err?.message || "Failed to fetch payments" });
+    }
 });
 
 // Get agent dashboard KPIs
 router.get("/agent/:agentId/kpis", async (req, res) => {
-	try {
-		const { agentId } = req.params;
-		
-		// Get today's date range
-		const today = new Date();
-		today.setHours(0, 0, 0, 0);
-		const tomorrow = new Date(today);
-		tomorrow.setDate(today.getDate() + 1);
-		
-		// Get this month's date range
-		const thisMonth = new Date(today.getFullYear(), today.getMonth(), 1);
-		const nextMonth = new Date(today.getFullYear(), today.getMonth() + 1, 1);
+    try {
+        const { agentId } = req.params;
+        
+        const today = new Date();
+        today.setHours(0, 0, 0, 0);
+        const tomorrow = new Date(today);
+        tomorrow.setDate(today.getDate() + 1);
+        
+        const thisMonth = new Date(today.getFullYear(), today.getMonth(), 1);
+        const nextMonth = new Date(today.getFullYear(), today.getMonth() + 1, 1);
 
 		// Today's collections
 		const todayPayments = await Payment.find({

@@ -2,10 +2,17 @@ const express = require("express");
 const cors = require("cors");
 const dotenv = require("dotenv");
 
+// Load environment variables early so any modules that read process.env during import can see them
+dotenv.config();
+
+// Optionally silence console.log output in production if requested
+if (process.env.SILENCE_LOGS === "true") {
+    // eslint-disable-next-line no-console
+    console.log = () => {};
+}
+
 const managerRouter = require("./routes/manager");
 const { connectToDatabase } = require("./lib/mongo.cjs");
-
-dotenv.config();
 
 const app = express();
 const port = process.env.PORT ? Number(process.env.PORT) : 5000;
